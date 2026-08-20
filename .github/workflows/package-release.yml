@@ -1,0 +1,545 @@
+name: Package Nokeval Ehto release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Numeric release version without a v prefix
+        required: true
+        type: string
+      source_sha:
+        description: Full private-source commit SHA
+        required: true
+        type: string
+      source_run_id:
+        description: Private Actions run containing the three prebuilt binaries
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: nokeval-ehto-public-package-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify private binary handoff
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Require a new version above the current public release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release version must be numeric and must not include a v prefix." >&2
+            exit 1
+          fi
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists." >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "Tag v$VERSION already exists." >&2
+            exit 1
+          fi
+
+          latest_tag="$(
+            gh release view \
+              --repo "$GITHUB_REPOSITORY" \
+              --json tagName \
+              --jq .tagName
+          )"
+          node scripts/validate-public-version.mjs "$VERSION" "$latest_tag"
+
+      - name: Create a read-only token for private Actions artifacts
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.SOURCE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SOURCE_APP_PRIVATE_KEY }}
+          owner: rikuws
+          repositories: ehto
+          permission-actions: read
+
+      - name: Validate the tagged source run and exact artifact set
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          if [[ "$GITHUB_REPOSITORY" != "rikuws/ehto-releases" || "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Release packaging must run from ehto-releases/main." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/source-run"
+          gh api "repos/rikuws/ehto/actions/runs/$SOURCE_RUN_ID" \
+            > "$RUNNER_TEMP/source-run/run.json"
+          gh api "repos/rikuws/ehto/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100&filter=latest" \
+            > "$RUNNER_TEMP/source-run/jobs.json"
+          gh api "repos/rikuws/ehto/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
+            > "$RUNNER_TEMP/source-run/artifacts.json"
+          node scripts/validate-source-run.mjs \
+            "$VERSION" \
+            "$SOURCE_SHA" \
+            "$SOURCE_RUN_ID" \
+            "$RUNNER_TEMP/source-run/run.json" \
+            "$RUNNER_TEMP/source-run/jobs.json" \
+            "$RUNNER_TEMP/source-run/artifacts.json"
+
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  package:
+    name: Sign and package ${{ matrix.label }}
+    needs: verify
+    environment:
+      name: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Apple Silicon
+            platform: macos-latest
+            transfer_id: macos-aarch64
+            bundle_args: --target aarch64-apple-darwin --bundles app,dmg
+            rust_targets: aarch64-apple-darwin
+            release_dir: src-tauri/target/aarch64-apple-darwin/release
+            binary_name: nokeval-ehto
+          - label: macOS Intel
+            platform: macos-latest
+            transfer_id: macos-x86_64
+            bundle_args: --target x86_64-apple-darwin --bundles app,dmg
+            rust_targets: x86_64-apple-darwin
+            release_dir: src-tauri/target/x86_64-apple-darwin/release
+            binary_name: nokeval-ehto
+          - label: Windows x64
+            platform: windows-latest
+            transfer_id: windows-x86_64
+            bundle_args: --bundles nsis
+            rust_targets: ""
+            release_dir: src-tauri/target/release
+            binary_name: nokeval-ehto.exe
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - run: npm ci --ignore-scripts
+      - run: node scripts/prepare-release-version.mjs "${{ inputs.version }}"
+
+      - name: Create a read-only token for the selected private artifact
+        id: source-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.SOURCE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.SOURCE_APP_PRIVATE_KEY }}
+          owner: rikuws
+          repositories: ehto
+          permission-actions: read
+
+      - name: Download the validated prebuilt native binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-binary-${{ matrix.transfer_id }}
+          path: ${{ runner.temp }}/source-artifact
+          github-token: ${{ steps.source-token.outputs.token }}
+          repository: rikuws/ehto
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Restore the single prebuilt native binary
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/source-artifact/${{ matrix.transfer_id }}-binary.tar.gz"
+          if command -v cygpath >/dev/null 2>&1; then
+            archive="$(cygpath -u "$archive")"
+          fi
+          entry_count="$(tar -tzf "$archive" | sed '/^$/d' | wc -l | tr -d ' ')"
+          entry_name="$(tar -tzf "$archive" | sed 's#^\./##')"
+          if [[ "$entry_count" -ne 1 || "$entry_name" != "${{ matrix.binary_name }}" ]]; then
+            echo "The native-binary transfer contained unexpected entries." >&2
+            exit 1
+          fi
+          invalid_type=0
+          while IFS= read -r listing; do
+            if [[ "${listing:0:1}" != "-" ]]; then
+              invalid_type=1
+            fi
+          done < <(tar -tvzf "$archive")
+          if [[ "$invalid_type" -ne 0 ]]; then
+            echo "The native-binary transfer contained a link or special entry." >&2
+            exit 1
+          fi
+          mkdir -p "${{ matrix.release_dir }}"
+          tar -xzf "$archive" -C "${{ matrix.release_dir }}"
+          node scripts/validate-release-transfer.mjs \
+            binary \
+            "${{ matrix.release_dir }}" \
+            "${{ matrix.binary_name }}"
+
+      - name: Restore macOS executable permission
+        if: startsWith(matrix.platform, 'macos')
+        run: chmod 0755 "${{ matrix.release_dir }}/${{ matrix.binary_name }}"
+
+      - name: Validate Windows updater-signing credential
+        if: startsWith(matrix.platform, 'windows')
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "Missing required Windows updater-signing secret: TAURI_SIGNING_PRIVATE_KEY" >&2
+            exit 1
+          fi
+
+      - name: Validate macOS release credentials
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          for name in \
+            TAURI_SIGNING_PRIVATE_KEY \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "Missing required macOS release secret(s):" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
+      - name: Bundle Windows installer and updater artifacts
+        if: startsWith(matrix.platform, 'windows')
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node node_modules/@tauri-apps/cli/tauri.js bundle ${{ matrix.bundle_args }} --config '{"build":{"beforeBundleCommand":""},"bundle":{"windows":{"signCommand":null,"nsis":{"template":null,"installerHooks":null}}}}'
+
+      - name: Bundle signed and notarized macOS artifacts
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+        run: node node_modules/@tauri-apps/cli/tauri.js bundle ${{ matrix.bundle_args }} --config '{"build":{"beforeBundleCommand":""}}'
+
+      - name: Notarize and staple the macOS DMG
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_TARGET: ${{ matrix.rust_targets }}
+        run: ./scripts/notarize-macos-dmg.sh
+
+      - name: Archive only the signed release products
+        shell: bash
+        run: |
+          bundle_dir="${{ matrix.release_dir }}/bundle"
+          if [[ ! -d "$bundle_dir" ]]; then
+            echo "Expected signed release bundles at $bundle_dir." >&2
+            exit 1
+          fi
+          transfer_root="$RUNNER_TEMP/release-transfer"
+          if command -v cygpath >/dev/null 2>&1; then
+            transfer_root="$(cygpath -u "$RUNNER_TEMP")/release-transfer"
+          fi
+          staged_root="$transfer_root/${{ matrix.transfer_id }}"
+          staged_bundle="$staged_root/bundle"
+          mkdir -p "$staged_bundle"
+          case "${{ matrix.platform }}" in
+            macos*) required_directories=(dmg macos) ;;
+            windows*) required_directories=(nsis) ;;
+            *)
+              echo "Unsupported release-bundle platform." >&2
+              exit 1
+              ;;
+          esac
+          for directory in "${required_directories[@]}"; do
+            if [[ ! -d "$bundle_dir/$directory" ]]; then
+              echo "Expected release bundle directory: $bundle_dir/$directory" >&2
+              exit 1
+            fi
+            cp -R "$bundle_dir/$directory" "$staged_bundle/"
+          done
+          node scripts/validate-release-transfer.mjs \
+            bundles \
+            "$staged_bundle" \
+            "${{ matrix.platform }}"
+          tar -czf \
+            "$transfer_root/${{ matrix.transfer_id }}-bundles.tar.gz" \
+            -C "$staged_root" \
+            bundle
+
+      - name: Transfer signed release bundles
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-release-${{ matrix.transfer_id }}
+          path: ${{ runner.temp }}/release-transfer/${{ matrix.transfer_id }}-bundles.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    name: Upload ${{ matrix.label }}
+    needs: package
+    permissions:
+      actions: read
+      contents: write
+    environment:
+      name: release
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: macOS Apple Silicon
+            platform: macos-latest
+            transfer_id: macos-aarch64
+            bundle_args: --target aarch64-apple-darwin --bundles app,dmg
+            release_dir: src-tauri/target/aarch64-apple-darwin/release
+          - label: macOS Intel
+            platform: macos-latest
+            transfer_id: macos-x86_64
+            bundle_args: --target x86_64-apple-darwin --bundles app,dmg
+            release_dir: src-tauri/target/x86_64-apple-darwin/release
+          - label: Windows x64
+            platform: windows-latest
+            transfer_id: windows-x86_64
+            bundle_args: --bundles nsis
+            release_dir: src-tauri/target/release
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+
+      - run: node scripts/prepare-release-version.mjs "${{ inputs.version }}"
+
+      - name: Download signed release bundles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-release-${{ matrix.transfer_id }}
+          path: ${{ runner.temp }}/release-transfer
+
+      - name: Restore signed release bundles
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/release-transfer/${{ matrix.transfer_id }}-bundles.tar.gz"
+          if command -v cygpath >/dev/null 2>&1; then
+            archive="$(cygpath -u "$archive")"
+          fi
+          member_count=0
+          while IFS= read -r entry; do
+            member_count=$((member_count + 1))
+            normalized="${entry#./}"
+            if [[ "$normalized" == *\\* ]]; then
+              echo "The signed-bundle transfer contained a backslash path." >&2
+              exit 1
+            fi
+            if [[ "$normalized" != "bundle" && "$normalized" != bundle/* ]]; then
+              echo "The signed-bundle transfer contained an unexpected path." >&2
+              exit 1
+            fi
+            if [[ "/$normalized/" == *"/../"* ]]; then
+              echo "The signed-bundle transfer contained a parent-directory path." >&2
+              exit 1
+            fi
+          done < <(tar -tzf "$archive")
+          if [[ "$member_count" -eq 0 ]]; then
+            echo "The signed-bundle transfer was empty." >&2
+            exit 1
+          fi
+          invalid_type=0
+          while IFS= read -r listing; do
+            case "${listing:0:1}" in
+              -|d) ;;
+              *) invalid_type=1 ;;
+            esac
+          done < <(tar -tvzf "$archive")
+          if [[ "$invalid_type" -ne 0 ]]; then
+            echo "The signed-bundle transfer contained a link or special entry." >&2
+            exit 1
+          fi
+          mkdir -p "${{ matrix.release_dir }}"
+          tar -xzf "$archive" -C "${{ matrix.release_dir }}"
+          node scripts/validate-release-transfer.mjs \
+            bundles \
+            "${{ matrix.release_dir }}/bundle" \
+            "${{ matrix.platform }}"
+
+      - name: Upload prebuilt release artifacts
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tauriScript: node -e process.exit(0)
+          args: ${{ matrix.bundle_args }}
+          owner: rikuws
+          repo: ehto-releases
+          releaseCommitish: main
+          tagName: v__VERSION__
+          releaseName: Nokeval Ehto v__VERSION__
+          releaseBody: |
+            Nokeval Ehto for macOS and Windows.
+
+            Source revision: rikuws/ehto@${{ inputs.source_sha }}
+
+            Installation trust status:
+            - macOS builds are signed with Developer ID Application and notarized.
+            - The Windows installer is unsigned.
+          releaseDraft: true
+          prerelease: false
+          retryAttempts: 2
+          releaseAssetNamePattern: "Nokeval_Ehto_[version]_[platform]_[arch][setup][ext]"
+          updaterJsonPreferNsis: true
+
+  publish:
+    name: Publish complete release
+    needs: upload
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment:
+      name: release
+    steps:
+      - name: Verify and publish the complete updater set
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          release_tag="v$VERSION"
+          asset_names="$(gh release view "$release_tag" --json assets --jq '.assets[].name')"
+          asset_count="$(sed '/^$/d' <<<"$asset_names" | wc -l | tr -d ' ')"
+          printf '%s\n' "$asset_names"
+
+          expected_name="Nokeval Ehto v$VERSION"
+          actual_name="$(gh release view "$release_tag" --json name --jq '.name')"
+          if [[ "$actual_name" != "$expected_name" ]]; then
+            echo "Unexpected release name: $actual_name" >&2
+            exit 1
+          fi
+          if [[ "$asset_count" -ne 9 ]]; then
+            echo "Expected exactly 9 release assets, found $asset_count." >&2
+            exit 1
+          fi
+          if grep -Ev '^(latest\.json|Nokeval_Ehto_)' <<<"$asset_names" | grep -q .; then
+            echo "Every application asset must use the Nokeval_Ehto prefix." >&2
+            exit 1
+          fi
+
+          grep -Fxq "latest.json" <<<"$asset_names"
+          [[ "$(grep -Ec '\.exe$' <<<"$asset_names")" -eq 1 ]]
+          [[ "$(grep -Ec '\.sig$' <<<"$asset_names")" -eq 3 ]]
+          [[ "$(grep -Ec 'aarch64.*\.app\.tar\.gz$' <<<"$asset_names")" -eq 1 ]]
+          [[ "$(grep -Ec '(x64|x86_64).*\.app\.tar\.gz$' <<<"$asset_names")" -eq 1 ]]
+          [[ "$(grep -Ec 'aarch64.*\.dmg$' <<<"$asset_names")" -eq 1 ]]
+          [[ "$(grep -Ec '(x64|x86_64).*\.dmg$' <<<"$asset_names")" -eq 1 ]]
+
+          mkdir -p "$RUNNER_TEMP/nokeval-ehto-release"
+          gh release download "$release_tag" \
+            --pattern latest.json \
+            --dir "$RUNNER_TEMP/nokeval-ehto-release"
+
+          release_id="$(gh release view "$release_tag" --json databaseId --jq '.databaseId')"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" \
+            --jq '[.[] | { id, name }]' \
+            > "$RUNNER_TEMP/nokeval-ehto-release/assets.json"
+
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const releaseDir = path.join(process.env.RUNNER_TEMP, "nokeval-ehto-release");
+          const manifest = JSON.parse(
+            fs.readFileSync(path.join(releaseDir, "latest.json"), "utf8")
+          );
+          const assets = JSON.parse(
+            fs.readFileSync(path.join(releaseDir, "assets.json"), "utf8")
+          );
+          const assetsById = new Map(assets.map((asset) => [String(asset.id), asset.name]));
+          const requiredPlatforms = {
+            "darwin-aarch64": (name) => /aarch64.*\.app\.tar\.gz$/.test(name),
+            "darwin-x86_64": (name) => /(x64|x86_64).*\.app\.tar\.gz$/.test(name),
+            "windows-x86_64": (name) => /(x64|x86_64).*\.exe$/.test(name)
+          };
+
+          if (manifest.version !== process.env.VERSION) {
+            throw new Error(`latest.json version ${manifest.version} does not match ${process.env.VERSION}.`);
+          }
+          if (!manifest.notes?.startsWith("Nokeval Ehto for macOS and Windows.")) {
+            throw new Error("latest.json has unexpected release notes.");
+          }
+          if (!manifest.notes.includes(`Source revision: rikuws/ehto@${process.env.SOURCE_SHA}`)) {
+            throw new Error("latest.json does not identify the validated source revision.");
+          }
+
+          for (const [platform, matchesAsset] of Object.entries(requiredPlatforms)) {
+            const entry = manifest.platforms?.[platform];
+            if (!entry || typeof entry.url !== "string" || !entry.url.trim()) {
+              throw new Error(`latest.json is missing the ${platform} updater URL.`);
+            }
+            if (typeof entry.signature !== "string" || !entry.signature.trim()) {
+              throw new Error(`latest.json is missing the ${platform} updater signature.`);
+            }
+
+            const url = new URL(entry.url);
+            const assetMatch = url.pathname.match(
+              /^\/repos\/rikuws\/ehto-releases\/releases\/assets\/(\d+)$/
+            );
+            if (url.protocol !== "https:" || url.hostname !== "api.github.com" || !assetMatch) {
+              throw new Error(`${platform} points outside the expected GitHub release: ${entry.url}`);
+            }
+
+            const assetName = assetsById.get(assetMatch[1]);
+            if (!assetName || !matchesAsset(assetName)) {
+              throw new Error(`${platform} references an unexpected release asset.`);
+            }
+          }
+          NODE
+
+          gh release edit "$release_tag" --draft=false --latest
