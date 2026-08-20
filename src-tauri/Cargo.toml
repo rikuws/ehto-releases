@@ -1,0 +1,11 @@
+[package]
+name = "nokeval-ehto"
+version = "0.0.0"
+description = "Nokeval Ehto material-sufficiency calculator"
+authors = ["Nokeval"]
+edition = "2021"
+default-run = "nokeval-ehto"
+
+[[bin]]
+name = "nokeval-ehto"
+path = "src/main.rs"

@@ -1,0 +1,12 @@
+{
+  "name": "nokeval-ehto-release-packaging",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.3"
+  }
+}
