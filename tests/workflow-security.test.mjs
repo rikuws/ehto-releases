@@ -30,6 +30,7 @@ test("keeps private command output runner-local and publishes only bundles", () 
   assert.match(workflow, /private-source-build-\$\{\{ matrix\.transfer_id \}\}\.log/);
   assert.match(workflow, /private logs were not published/);
   assert.match(workflow, /\) >"\$private_log" 2>&1/);
+  assert.match(workflow, /stage-release-bundles\.mjs/);
   assert.match(workflow, /signed-release-\$\{\{ matrix\.transfer_id \}\}/);
   const uploadStep = workflow.match(
     /uses: actions\/upload-artifact@[0-9a-f]{40}[\s\S]*?(?=\n      - (?:name|uses|run):|\n  upload:)/
