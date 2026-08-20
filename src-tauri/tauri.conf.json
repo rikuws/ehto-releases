@@ -23,7 +23,7 @@
       "endpoints": [
         "https://github.com/rikuws/ehto-releases/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI2MEEyQTFENzM3RjRGOEYKUldTUFQzOXpIU29LdHI2bkxsNTNyMzdDV0dMaElLMlgvS29rYXJkQ3NrZ1UrWEdjWWJoL1lnY28K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU3ODFFNkRGNDgzMTY0RkIKUldUN1pERkkzK2FCVjBjTnhRR2c2RGpVQWxNZ3JlUmp3dFJMTmthK3hsZFhzMjJBMUZrYXpaVnQK",
       "windows": {
         "installMode": "passive"
       }
