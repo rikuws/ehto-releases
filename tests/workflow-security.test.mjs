@@ -14,19 +14,33 @@ test("is a trusted manual release workflow with no pull-request or tag trigger",
   assert.match(workflow, /validate-public-version\.mjs "\$VERSION" "\$latest_tag"/);
 });
 
-test("reads only private Actions artifacts and never checks out private source", () => {
-  assert.match(workflow, /permission-actions: read/);
-  assert.doesNotMatch(workflow, /permission-contents: read/);
-  assert.doesNotMatch(workflow, /git clone/);
-  assert.doesNotMatch(workflow, /npm run build/);
-  assert.doesNotMatch(workflow, /cargo (build|test|clippy)/);
+test("checks out only the exact private revision with a read-only token", () => {
+  assert.match(workflow, /permission-contents: read/);
   assert.match(workflow, /repository: rikuws\/ehto/);
-  assert.match(workflow, /run-id: \$\{\{ inputs\.source_run_id \}\}/);
+  assert.match(workflow, /ref: \$\{\{ inputs\.source_sha \}\}/);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /git\/ref\/tags\/v\$VERSION/);
+  assert.match(workflow, /compare\/\$SOURCE_SHA\.\.\.main/);
+  assert.match(workflow, /\^\[0-9a-f\]\{40\}\$/);
+  assert.doesNotMatch(workflow, /source_run_id/);
+});
+
+test("keeps private command output runner-local and publishes only bundles", () => {
+  assert.match(workflow, /private-source-verify\.log/);
+  assert.match(workflow, /private-source-build-\$\{\{ matrix\.transfer_id \}\}\.log/);
+  assert.match(workflow, /private logs were not published/);
+  assert.match(workflow, /\) >"\$private_log" 2>&1/);
+  assert.match(workflow, /signed-release-\$\{\{ matrix\.transfer_id \}\}/);
+  const uploadStep = workflow.match(
+    /uses: actions\/upload-artifact@[0-9a-f]{40}[\s\S]*?(?=\n      - (?:name|uses|run):|\n  upload:)/
+  )?.[0];
+  assert.ok(uploadStep, "expected one artifact-upload step");
+  assert.doesNotMatch(uploadStep, /path:\s*private-source/);
 });
 
 test("keeps release credentials step-scoped and publishes with the local token", () => {
   assert.doesNotMatch(workflow, /^env:/m);
-  assert.doesNotMatch(workflow, /RELEASE_REPO_TOKEN/);
+  assert.doesNotMatch(workflow, /secrets\.RELEASE_REPO_TOKEN/);
   assert.match(workflow, /GITHUB_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(workflow, /environment:\n      name: release/g);
   assert.match(workflow, /actions\/create-github-app-token@[0-9a-f]{40}/);

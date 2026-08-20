@@ -11,10 +11,6 @@ on:
         description: Full private-source commit SHA
         required: true
         type: string
-      source_run_id:
-        description: Private Actions run containing the three prebuilt binaries
-        required: true
-        type: string
 
 permissions:
   actions: read
@@ -26,7 +22,7 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify private binary handoff
+    name: Verify private tagged source
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -65,7 +61,7 @@ jobs:
           )"
           node scripts/validate-public-version.mjs "$VERSION" "$latest_tag"
 
-      - name: Create a read-only token for private Actions artifacts
+      - name: Create a read-only token for private source
         id: source-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -73,34 +69,106 @@ jobs:
           private-key: ${{ secrets.SOURCE_APP_PRIVATE_KEY }}
           owner: rikuws
           repositories: ehto
-          permission-actions: read
+          permission-contents: read
 
-      - name: Validate the tagged source run and exact artifact set
+      - name: Validate the exact private tag and main ancestry
         shell: bash
         env:
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
           VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Source SHA must be a full lowercase commit SHA." >&2
+            exit 1
+          fi
           if [[ "$GITHUB_REPOSITORY" != "rikuws/ehto-releases" || "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "Release packaging must run from ehto-releases/main." >&2
             exit 1
           fi
-          mkdir -p "$RUNNER_TEMP/source-run"
-          gh api "repos/rikuws/ehto/actions/runs/$SOURCE_RUN_ID" \
-            > "$RUNNER_TEMP/source-run/run.json"
-          gh api "repos/rikuws/ehto/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100&filter=latest" \
-            > "$RUNNER_TEMP/source-run/jobs.json"
-          gh api "repos/rikuws/ehto/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" \
-            > "$RUNNER_TEMP/source-run/artifacts.json"
-          node scripts/validate-source-run.mjs \
-            "$VERSION" \
-            "$SOURCE_SHA" \
-            "$SOURCE_RUN_ID" \
-            "$RUNNER_TEMP/source-run/run.json" \
-            "$RUNNER_TEMP/source-run/jobs.json" \
-            "$RUNNER_TEMP/source-run/artifacts.json"
+          tag_type="$(gh api "repos/rikuws/ehto/git/ref/tags/v$VERSION" --jq .object.type)"
+          tag_object="$(gh api "repos/rikuws/ehto/git/ref/tags/v$VERSION" --jq .object.sha)"
+          if [[ "$tag_type" == "tag" ]]; then
+            tag_type="$(gh api "repos/rikuws/ehto/git/tags/$tag_object" --jq .object.type)"
+            tag_object="$(gh api "repos/rikuws/ehto/git/tags/$tag_object" --jq .object.sha)"
+          fi
+          if [[ "$tag_type" != "commit" || "$tag_object" != "$SOURCE_SHA" ]]; then
+            echo "Private tag v$VERSION does not resolve to the requested source SHA." >&2
+            exit 1
+          fi
+          compare_status="$(
+            gh api "repos/rikuws/ehto/compare/$SOURCE_SHA...main" --jq .status
+          )"
+          if [[ "$compare_status" != "ahead" && "$compare_status" != "identical" ]]; then
+            echo "The requested private source is not part of private main." >&2
+            exit 1
+          fi
+
+      - name: Check out the exact private source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: rikuws/ehto
+          ref: ${{ inputs.source_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          path: private-source
+          persist-credentials: false
+
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Verify private source without publishing private build logs
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          GITHUB_TOKEN: EHTO_GITHUB_TOKEN_SENTINEL_0A6E43F2
+          RELEASE_REPO_TOKEN: EHTO_RELEASE_REPO_TOKEN_SENTINEL_9C71E2A4
+          TAURI_SIGNING_PRIVATE_KEY: EHTO_TAURI_PRIVATE_KEY_SENTINEL_3F8B6D10
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: EHTO_TAURI_KEY_PASSWORD_SENTINEL_5A24C9E7
+          APPLE_CERTIFICATE: EHTO_APPLE_CERTIFICATE_SENTINEL_71D0B6F3
+          APPLE_CERTIFICATE_PASSWORD: EHTO_APPLE_CERT_PASSWORD_SENTINEL_42E9A8C5
+          APPLE_ID: EHTO_APPLE_ID_SENTINEL_8B3F51D6
+          APPLE_PASSWORD: EHTO_APPLE_PASSWORD_SENTINEL_6D1C7A90
+          APPLE_TEAM_ID: EHTO_APPLE_TEAM_ID_SENTINEL_2E54F8B1
+        run: |
+          set -euo pipefail
+          private_log="$RUNNER_TEMP/private-source-verify.log"
+          expected_updater_key="$(node -e 'process.stdout.write(require("./src-tauri/tauri.conf.json").plugins.updater.pubkey)')"
+          if ! (
+            cd private-source
+            [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+            EXPECTED_UPDATER_KEY="$expected_updater_key" node <<'NODE'
+          const fs = require("node:fs");
+          const pkg = require("./package.json");
+          const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+          const config = require("./src-tauri/tauri.conf.json");
+          const cargoVersion = cargo.match(/^version = "([^"]+)"/m)?.[1];
+
+          if (pkg.version !== process.env.VERSION || cargoVersion !== process.env.VERSION) {
+            throw new Error("Private package, Cargo, and requested versions must agree.");
+          }
+          if (config.version !== "../package.json") {
+            throw new Error("Private Tauri config must read its version from package.json.");
+          }
+          if (config.plugins?.updater?.pubkey !== process.env.EXPECTED_UPDATER_KEY) {
+            throw new Error("Private source and public packaging harness updater keys differ.");
+          }
+          NODE
+            npm ci
+            npm test
+            cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+            cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+            npm run test:rust
+            npm run build
+            node scripts/check-built-assets-for-release-sentinels.mjs dist
+          ) >"$private_log" 2>&1; then
+            rm -f "$private_log"
+            echo "Private source verification failed. Reproduce locally at $SOURCE_SHA; private logs were not published." >&2
+            exit 1
+          fi
+          rm -f "$private_log"
 
       - run: npm ci --ignore-scripts
       - run: npm test
@@ -117,22 +185,28 @@ jobs:
           - label: macOS Apple Silicon
             platform: macos-latest
             transfer_id: macos-aarch64
+            compile_args: --target aarch64-apple-darwin
             bundle_args: --target aarch64-apple-darwin --bundles app,dmg
             rust_targets: aarch64-apple-darwin
+            private_binary_dir: private-source/src-tauri/target/aarch64-apple-darwin/release
             release_dir: src-tauri/target/aarch64-apple-darwin/release
             binary_name: nokeval-ehto
           - label: macOS Intel
             platform: macos-latest
             transfer_id: macos-x86_64
+            compile_args: --target x86_64-apple-darwin
             bundle_args: --target x86_64-apple-darwin --bundles app,dmg
             rust_targets: x86_64-apple-darwin
+            private_binary_dir: private-source/src-tauri/target/x86_64-apple-darwin/release
             release_dir: src-tauri/target/x86_64-apple-darwin/release
             binary_name: nokeval-ehto
           - label: Windows x64
             platform: windows-latest
             transfer_id: windows-x86_64
+            compile_args: ""
             bundle_args: --bundles nsis
             rust_targets: ""
+            private_binary_dir: private-source/src-tauri/target/release
             release_dir: src-tauri/target/release
             binary_name: nokeval-ehto.exe
     runs-on: ${{ matrix.platform }}
@@ -151,7 +225,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: node scripts/prepare-release-version.mjs "${{ inputs.version }}"
 
-      - name: Create a read-only token for the selected private artifact
+      - name: Create a read-only token for private source
         id: source-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -159,42 +233,55 @@ jobs:
           private-key: ${{ secrets.SOURCE_APP_PRIVATE_KEY }}
           owner: rikuws
           repositories: ehto
-          permission-actions: read
+          permission-contents: read
 
-      - name: Download the validated prebuilt native binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Check out the exact private source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          name: release-binary-${{ matrix.transfer_id }}
-          path: ${{ runner.temp }}/source-artifact
-          github-token: ${{ steps.source-token.outputs.token }}
           repository: rikuws/ehto
-          run-id: ${{ inputs.source_run_id }}
+          ref: ${{ inputs.source_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          path: private-source
+          persist-credentials: false
+
+      - name: Compile private source without publishing private build logs
+        shell: bash
+        env:
+          GITHUB_TOKEN: EHTO_GITHUB_TOKEN_SENTINEL_0A6E43F2
+          RELEASE_REPO_TOKEN: EHTO_RELEASE_REPO_TOKEN_SENTINEL_9C71E2A4
+          TAURI_SIGNING_PRIVATE_KEY: EHTO_TAURI_PRIVATE_KEY_SENTINEL_3F8B6D10
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: EHTO_TAURI_KEY_PASSWORD_SENTINEL_5A24C9E7
+          APPLE_CERTIFICATE: EHTO_APPLE_CERTIFICATE_SENTINEL_71D0B6F3
+          APPLE_CERTIFICATE_PASSWORD: EHTO_APPLE_CERT_PASSWORD_SENTINEL_42E9A8C5
+          APPLE_ID: EHTO_APPLE_ID_SENTINEL_8B3F51D6
+          APPLE_PASSWORD: EHTO_APPLE_PASSWORD_SENTINEL_6D1C7A90
+          APPLE_TEAM_ID: EHTO_APPLE_TEAM_ID_SENTINEL_2E54F8B1
+        run: |
+          set -euo pipefail
+          private_log="$RUNNER_TEMP/private-source-build-${{ matrix.transfer_id }}.log"
+          if ! (
+            cd private-source
+            npm ci
+            npm run build
+            node scripts/check-built-assets-for-release-sentinels.mjs dist
+            node node_modules/@tauri-apps/cli/tauri.js build ${{ matrix.compile_args }} --no-bundle --config '{"build":{"beforeBuildCommand":""}}'
+          ) >"$private_log" 2>&1; then
+            rm -f "$private_log"
+            echo "Private ${{ matrix.label }} build failed. Reproduce locally at ${{ inputs.source_sha }}; private logs were not published." >&2
+            exit 1
+          fi
+          rm -f "$private_log"
 
       - name: Restore the single prebuilt native binary
         shell: bash
         run: |
-          archive="$RUNNER_TEMP/source-artifact/${{ matrix.transfer_id }}-binary.tar.gz"
-          if command -v cygpath >/dev/null 2>&1; then
-            archive="$(cygpath -u "$archive")"
-          fi
-          entry_count="$(tar -tzf "$archive" | sed '/^$/d' | wc -l | tr -d ' ')"
-          entry_name="$(tar -tzf "$archive" | sed 's#^\./##')"
-          if [[ "$entry_count" -ne 1 || "$entry_name" != "${{ matrix.binary_name }}" ]]; then
-            echo "The native-binary transfer contained unexpected entries." >&2
-            exit 1
-          fi
-          invalid_type=0
-          while IFS= read -r listing; do
-            if [[ "${listing:0:1}" != "-" ]]; then
-              invalid_type=1
-            fi
-          done < <(tar -tvzf "$archive")
-          if [[ "$invalid_type" -ne 0 ]]; then
-            echo "The native-binary transfer contained a link or special entry." >&2
+          private_binary="${{ matrix.private_binary_dir }}/${{ matrix.binary_name }}"
+          if [[ ! -f "$private_binary" || -L "$private_binary" ]]; then
+            echo "Expected one regular private build product." >&2
             exit 1
           fi
           mkdir -p "${{ matrix.release_dir }}"
-          tar -xzf "$archive" -C "${{ matrix.release_dir }}"
+          cp "$private_binary" "${{ matrix.release_dir }}/${{ matrix.binary_name }}"
           node scripts/validate-release-transfer.mjs \
             binary \
             "${{ matrix.release_dir }}" \
