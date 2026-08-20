@@ -46,6 +46,7 @@ test("keeps release credentials step-scoped and publishes with the local token",
   assert.match(workflow, /environment:\n      name: release/g);
   assert.match(workflow, /actions\/create-github-app-token@[0-9a-f]{40}/);
   assert.match(workflow, /latest\.json does not identify the validated source revision/);
+  assert.match(workflow, /GH_REPO: \$\{\{ github\.repository \}\}/);
 });
 
 test("pins every external action to an immutable commit", () => {
