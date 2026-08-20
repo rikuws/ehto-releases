@@ -375,21 +375,10 @@ jobs:
           staged_root="$transfer_root/${{ matrix.transfer_id }}"
           staged_bundle="$staged_root/bundle"
           mkdir -p "$staged_bundle"
-          case "${{ matrix.platform }}" in
-            macos*) required_directories=(dmg macos) ;;
-            windows*) required_directories=(nsis) ;;
-            *)
-              echo "Unsupported release-bundle platform." >&2
-              exit 1
-              ;;
-          esac
-          for directory in "${required_directories[@]}"; do
-            if [[ ! -d "$bundle_dir/$directory" ]]; then
-              echo "Expected release bundle directory: $bundle_dir/$directory" >&2
-              exit 1
-            fi
-            cp -R "$bundle_dir/$directory" "$staged_bundle/"
-          done
+          node scripts/stage-release-bundles.mjs \
+            "$bundle_dir" \
+            "$staged_bundle" \
+            "${{ matrix.platform }}"
           node scripts/validate-release-transfer.mjs \
             bundles \
             "$staged_bundle" \
