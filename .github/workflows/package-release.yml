@@ -68,7 +68,7 @@ jobs:
           client-id: ${{ vars.SOURCE_APP_CLIENT_ID }}
           private-key: ${{ secrets.SOURCE_APP_PRIVATE_KEY }}
           owner: rikuws
-          repositories: ehto
+          repositories: runko
           permission-contents: read
 
       - name: Validate the exact private tag and main ancestry
@@ -86,18 +86,18 @@ jobs:
             echo "Release packaging must run from ehto-releases/main." >&2
             exit 1
           fi
-          tag_type="$(gh api "repos/rikuws/ehto/git/ref/tags/v$VERSION" --jq .object.type)"
-          tag_object="$(gh api "repos/rikuws/ehto/git/ref/tags/v$VERSION" --jq .object.sha)"
+          tag_type="$(gh api "repos/rikuws/runko/git/ref/tags/v$VERSION" --jq .object.type)"
+          tag_object="$(gh api "repos/rikuws/runko/git/ref/tags/v$VERSION" --jq .object.sha)"
           if [[ "$tag_type" == "tag" ]]; then
-            tag_type="$(gh api "repos/rikuws/ehto/git/tags/$tag_object" --jq .object.type)"
-            tag_object="$(gh api "repos/rikuws/ehto/git/tags/$tag_object" --jq .object.sha)"
+            tag_type="$(gh api "repos/rikuws/runko/git/tags/$tag_object" --jq .object.type)"
+            tag_object="$(gh api "repos/rikuws/runko/git/tags/$tag_object" --jq .object.sha)"
           fi
           if [[ "$tag_type" != "commit" || "$tag_object" != "$SOURCE_SHA" ]]; then
             echo "Private tag v$VERSION does not resolve to the requested source SHA." >&2
             exit 1
           fi
           compare_status="$(
-            gh api "repos/rikuws/ehto/compare/$SOURCE_SHA...main" --jq .status
+            gh api "repos/rikuws/runko/compare/$SOURCE_SHA...main" --jq .status
           )"
           if [[ "$compare_status" != "ahead" && "$compare_status" != "identical" ]]; then
             echo "The requested private source is not part of private main." >&2
@@ -107,7 +107,7 @@ jobs:
       - name: Check out the exact private source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: rikuws/ehto
+          repository: rikuws/runko
           ref: ${{ inputs.source_sha }}
           token: ${{ steps.source-token.outputs.token }}
           path: private-source
@@ -137,7 +137,7 @@ jobs:
           private_log="$RUNNER_TEMP/private-source-verify.log"
           expected_updater_key="$(node -e 'process.stdout.write(require("./src-tauri/tauri.conf.json").plugins.updater.pubkey)')"
           if ! (
-            cd private-source
+            cd private-source/apps/ehto
             [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
             EXPECTED_UPDATER_KEY="$expected_updater_key" node <<'NODE'
           const fs = require("node:fs");
@@ -188,7 +188,7 @@ jobs:
             compile_args: --target aarch64-apple-darwin
             bundle_args: --target aarch64-apple-darwin --bundles app,dmg
             rust_targets: aarch64-apple-darwin
-            private_binary_dir: private-source/src-tauri/target/aarch64-apple-darwin/release
+            private_binary_dir: private-source/target/aarch64-apple-darwin/release
             release_dir: src-tauri/target/aarch64-apple-darwin/release
             binary_name: nokeval-ehto
           - label: macOS Intel
@@ -197,7 +197,7 @@ jobs:
             compile_args: --target x86_64-apple-darwin
             bundle_args: --target x86_64-apple-darwin --bundles app,dmg
             rust_targets: x86_64-apple-darwin
-            private_binary_dir: private-source/src-tauri/target/x86_64-apple-darwin/release
+            private_binary_dir: private-source/target/x86_64-apple-darwin/release
             release_dir: src-tauri/target/x86_64-apple-darwin/release
             binary_name: nokeval-ehto
           - label: Windows x64
@@ -206,7 +206,7 @@ jobs:
             compile_args: ""
             bundle_args: --bundles nsis
             rust_targets: ""
-            private_binary_dir: private-source/src-tauri/target/release
+            private_binary_dir: private-source/target/release
             release_dir: src-tauri/target/release
             binary_name: nokeval-ehto.exe
     runs-on: ${{ matrix.platform }}
@@ -232,13 +232,13 @@ jobs:
           client-id: ${{ vars.SOURCE_APP_CLIENT_ID }}
           private-key: ${{ secrets.SOURCE_APP_PRIVATE_KEY }}
           owner: rikuws
-          repositories: ehto
+          repositories: runko
           permission-contents: read
 
       - name: Check out the exact private source revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          repository: rikuws/ehto
+          repository: rikuws/runko
           ref: ${{ inputs.source_sha }}
           token: ${{ steps.source-token.outputs.token }}
           path: private-source
@@ -260,7 +260,7 @@ jobs:
           set -euo pipefail
           private_log="$RUNNER_TEMP/private-source-build-${{ matrix.transfer_id }}.log"
           if ! (
-            cd private-source
+            cd private-source/apps/ehto
             npm ci
             npm run build
             node scripts/check-built-assets-for-release-sentinels.mjs dist
@@ -501,7 +501,7 @@ jobs:
           releaseBody: |
             Nokeval Ehto for macOS and Windows.
 
-            Source revision: rikuws/ehto@${{ inputs.source_sha }}
+            Source revision: rikuws/runko@${{ inputs.source_sha }}
 
             Installation trust status:
             - macOS builds are signed with Developer ID Application and notarized.
@@ -591,7 +591,7 @@ jobs:
           if (!manifest.notes?.startsWith("Nokeval Ehto for macOS and Windows.")) {
             throw new Error("latest.json has unexpected release notes.");
           }
-          if (!manifest.notes.includes(`Source revision: rikuws/ehto@${process.env.SOURCE_SHA}`)) {
+          if (!manifest.notes.includes(`Source revision: rikuws/runko@${process.env.SOURCE_SHA}`)) {
             throw new Error("latest.json does not identify the validated source revision.");
           }
 

@@ -18,12 +18,14 @@ installer is Authenticode-signed.
 
 This repository contains a minimal Tauri packaging harness, not the application
 source. Its manually dispatched workflow checks out one exact tagged revision
-from the private `rikuws/ehto` repository into an ephemeral GitHub-hosted runner,
-then compiles, signs, packages, and publishes the release. Private build and test
+of the private `rikuws/runko` monorepo, where Nokeval Ehto lives in `apps/ehto`,
+into an ephemeral GitHub-hosted runner, then compiles, signs, packages, and
+publishes the release. The repository was named `rikuws/ehto` before it became
+a monorepo. Private build and test
 output is redirected to runner-local files and deleted; only signed application
 bundles are transferred or uploaded as public artifacts.
 
-The workflow uses a GitHub App installed only on `rikuws/ehto`. The installation
+The workflow uses a GitHub App installed only on `rikuws/runko`. The installation
 has read-only access to Contents, Actions, and mandatory Metadata, while each
 workflow token explicitly requests only **Contents: read**. The App cannot write
 to the private repository. Configure the public repository's protected `release`

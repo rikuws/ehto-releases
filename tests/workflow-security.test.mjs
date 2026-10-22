@@ -16,7 +16,9 @@ test("is a trusted manual release workflow with no pull-request or tag trigger",
 
 test("checks out only the exact private revision with a read-only token", () => {
   assert.match(workflow, /permission-contents: read/);
-  assert.match(workflow, /repository: rikuws\/ehto/);
+  assert.match(workflow, /^          repository: rikuws\/runko$/m);
+  assert.match(workflow, /^          repositories: runko$/m);
+  assert.doesNotMatch(workflow, /rikuws\/ehto(?!-releases)/);
   assert.match(workflow, /ref: \$\{\{ inputs\.source_sha \}\}/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /git\/ref\/tags\/v\$VERSION/);
@@ -55,5 +57,19 @@ test("pins every external action to an immutable commit", () => {
   assert.ok(uses.length > 0);
   for (const action of uses) {
     assert.match(action, /@[0-9a-f]{40}$/);
+  }
+});
+
+test("builds Ehto from its directory in the private monorepo", () => {
+  const cds = workflow.match(/^ +cd private-source.*$/gm) ?? [];
+  assert.equal(cds.length, 2);
+  for (const line of cds) {
+    assert.match(line, /cd private-source\/apps\/ehto$/);
+  }
+  // The monorepo's Cargo workspace builds into its root target directory.
+  const binaryDirs = workflow.match(/private_binary_dir: .+$/gm) ?? [];
+  assert.equal(binaryDirs.length, 3);
+  for (const line of binaryDirs) {
+    assert.match(line, /private_binary_dir: private-source\/target\//);
   }
 });
